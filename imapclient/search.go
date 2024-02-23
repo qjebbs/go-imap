@@ -102,6 +102,12 @@ func (c *Client) handleSearch() error {
 			break
 		}
 
+		// smtp-n.global-mail.cn responses:
+		// * SEARCH<SP><CRLF>
+		if !c.dec.SkipSP() {
+			break
+		}
+
 		var num uint32
 		if !c.dec.ExpectNumber(&num) {
 			return c.dec.Err()
