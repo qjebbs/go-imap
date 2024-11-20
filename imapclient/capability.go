@@ -40,6 +40,11 @@ func (cmd *CapabilityCommand) Wait() (imap.CapSet, error) {
 func readCapabilities(dec *imapwire.Decoder) (imap.CapSet, error) {
 	caps := make(imap.CapSet)
 	for dec.SP() {
+		// Some IMAP servers send multiple SP between caps:
+		// https://github.com/emersion/go-imap/pull/652
+		for dec.SP() {
+		}
+
 		var name string
 		if !dec.ExpectAtom(&name) {
 			return caps, fmt.Errorf("in capability-data: %v", dec.Err())
