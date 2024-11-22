@@ -21,6 +21,7 @@ package imapclient
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -35,6 +36,7 @@ import (
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/internal"
 	"github.com/emersion/go-imap/v2/internal/imapwire"
+	"github.com/emersion/go-imap/v2/internal/serial"
 )
 
 const (
@@ -76,6 +78,10 @@ type Options struct {
 	UnilateralDataHandler *UnilateralDataHandler
 	// Decoder for RFC 2047 words.
 	WordDecoder *mime.WordDecoder
+	// CommandsQueueSize is the size of the queue for commands that are waiting
+	// to be sent in order to the server. The order of commands exceeding this
+	// size is not guaranteed. The default size is 16.
+	CommandsQueueSize int
 }
 
 func (options *Options) wrapReadWriter(rw io.ReadWriter) io.ReadWriter {
@@ -145,6 +151,8 @@ type Client struct {
 	decCh  chan struct{}
 	decErr error
 
+	serial *serial.Control
+
 	mutex        sync.Mutex
 	state        imap.ConnState
 	caps         imap.CapSet
@@ -166,6 +174,9 @@ func New(conn net.Conn, options *Options) *Client {
 	if options == nil {
 		options = &Options{}
 	}
+	if options.CommandsQueueSize <= 0 {
+		options.CommandsQueueSize = 16
+	}
 
 	rw := options.wrapReadWriter(conn)
 	br := bufio.NewReader(rw)
@@ -179,6 +190,7 @@ func New(conn net.Conn, options *Options) *Client {
 		dec:        imapwire.NewDecoder(br, imapwire.ConnSideClient),
 		greetingCh: make(chan struct{}),
 		decCh:      make(chan struct{}),
+		serial:     serial.NewControl(serial.WithOrdered(options.CommandsQueueSize)),
 		state:      imap.ConnStateNone,
 		enabled:    make(imap.CapSet),
 	}
@@ -396,6 +408,8 @@ func (c *Client) Close() error {
 //
 // The caller must call commandEncoder.end.
 func (c *Client) beginCommand(name string, cmd command) *commandEncoder {
+	baseCmd := cmd.base()
+	baseCmd.preStart(c.serial, name)
 	c.encMutex.Lock() // unlocked by commandEncoder.end
 
 	c.mutex.Lock()
@@ -403,11 +417,7 @@ func (c *Client) beginCommand(name string, cmd command) *commandEncoder {
 	c.cmdTag++
 	tag := fmt.Sprintf("T%v", c.cmdTag)
 
-	baseCmd := cmd.base()
-	*baseCmd = commandBase{
-		tag:  tag,
-		done: make(chan error, 1),
-	}
+	baseCmd.start(tag)
 
 	c.pendingCmds = append(c.pendingCmds, cmd)
 	quotedUTF8 := c.caps.Has(imap.CapIMAP4rev2) || c.enabled.Has(imap.CapUTF8Accept)
@@ -475,9 +485,7 @@ func findPendingCmdByType[T command](c *Client) T {
 }
 
 func (c *Client) completeCommand(cmd command, err error) {
-	done := cmd.base().done
-	done <- err
-	close(done)
+	cmd.base().complete(err)
 
 	// Ensure the command is not blocked waiting on continuation requests
 	c.mutex.Lock()
@@ -551,6 +559,7 @@ func (c *Client) registerContReq(cmd command) *imapwire.ContinuationRequest {
 }
 
 func (c *Client) closeWithError(err error) {
+	c.serial.Close()
 	c.conn.Close()
 
 	c.mutex.Lock()
@@ -1177,6 +1186,8 @@ type commandBase struct {
 	tag  string
 	done chan error
 	err  error
+
+	cancel func()
 }
 
 func (cmd *commandBase) base() *commandBase {
@@ -1188,6 +1199,38 @@ func (cmd *commandBase) wait() error {
 		cmd.err = <-cmd.done
 	}
 	return cmd.err
+}
+
+func (cmd *commandBase) preStart(serial *serial.Control, name string) {
+	if !isSerial(name) {
+		return
+	}
+	_, cancel := serial.New(context.Background())
+	cmd.cancel = cancel
+	// If the *Client has been closed, commands in the queue will still be executed
+	// but report 'use of closed network connection' error.
+
+	// TODO: cancel commands in queue if *Client (also the *serial.Control) is closed.
+}
+
+func (cmd *commandBase) start(tag string) {
+	cmd.tag = tag
+	cmd.done = make(chan error, 1)
+}
+
+func (cmd *commandBase) complete(err error) {
+	cmd.done <- err
+	if cmd.cancel != nil {
+		cmd.cancel()
+	}
+	close(cmd.done)
+}
+
+// RFC 3501 #section-5.5
+func isSerial(name string) bool {
+	return name != "FETCH" &&
+		name != "STORE" &&
+		name != "SEARCH"
 }
 
 // Command is a basic IMAP command.
