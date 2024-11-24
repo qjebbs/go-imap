@@ -302,9 +302,9 @@ func (c *Client) Caps() imap.CapSet {
 	c.mutex.Lock()
 	caps := c.caps
 	capCh := c.pendingCapCh
-	c.mutex.Unlock()
 
 	if caps != nil {
+		c.mutex.Unlock()
 		return caps
 	}
 
@@ -315,10 +315,9 @@ func (c *Client) Caps() imap.CapSet {
 			capCmd.Wait()
 			close(capCh)
 		}()
-		c.mutex.Lock()
 		c.pendingCapCh = capCh
-		c.mutex.Unlock()
 	}
+	c.mutex.Unlock()
 
 	timer := time.NewTimer(respReadTimeout)
 	defer timer.Stop()
@@ -336,6 +335,8 @@ func (c *Client) Caps() imap.CapSet {
 }
 
 func (c *Client) setCaps(caps imap.CapSet) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
 	// If the capabilities are being reset, request the updated capabilities
 	// from the server
 	var capCh chan struct{}
@@ -350,10 +351,8 @@ func (c *Client) setCaps(caps imap.CapSet) {
 		}()
 	}
 
-	c.mutex.Lock()
 	c.caps = caps
 	c.pendingCapCh = capCh
-	c.mutex.Unlock()
 }
 
 // Mailbox returns the state of the currently selected mailbox.
