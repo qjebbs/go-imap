@@ -61,6 +61,10 @@ func (c *Client) ID(idData *imap.IDData) *IDCommand {
 		addIDKeyValue(enc, &isFirstKey, "environment", idData.Environment)
 	}
 
+	for k, v := range idData.Other {
+		addIDKeyValue(enc, &isFirstKey, k, v)
+	}
+
 	enc.Special(')')
 	enc.end()
 	return cmd

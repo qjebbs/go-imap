@@ -12,4 +12,5 @@ type IDData struct {
 	Command     string
 	Arguments   string
 	Environment string
+	Other       map[string]string
 }
